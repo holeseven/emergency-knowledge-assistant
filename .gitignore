@@ -11,3 +11,4 @@ data/vectordb/
 .idea/
 .DS_Store
 ai-customer/
+.venv/
