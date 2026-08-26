@@ -1,0 +1,294 @@
+# ============================================================
+# 中间件层：Elasticsearch + Redis + RocketMQ
+# 说明：生产环境建议使用托管服务（如阿里云 ES、Redis），
+#       此处为本地开发/演示环境的 K8s 部署方式
+# ============================================================
+
+# ============================
+# Elasticsearch - 全文检索引擎
+# 用途：存储知识库文档向量和全文索引，支撑 RAG 检索
+# ============================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: rag-system
+  labels:
+    app: elasticsearch
+    tier: middleware
+spec:
+  # StatefulSet：保证 Pod 有稳定的网络标识和持久存储
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+        tier: middleware
+    spec:
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+          ports:
+            - containerPort: 9200
+              name: http
+            - containerPort: 9300
+              name: transport
+          env:
+            # 单节点模式，适合开发/测试
+            - name: discovery.type
+              value: "single-node"
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+            # 关闭安全特性（开发环境简化配置）
+            - name: xpack.security.enabled
+              value: "false"
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          # 数据目录挂载到持久卷，Pod 重建数据不丢失
+          volumeMounts:
+            - name: es-data
+              mountPath: /usr/share/elasticsearch/data
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 30
+            periodSeconds: 10
+  # 持久卷声明模板：自动为每个 Pod 创建独立的 PVC
+  volumeClaimTemplates:
+    - metadata:
+        name: es-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            # 开发环境 10Gi，生产按需扩容
+            storage: 10Gi
+
+---
+# Elasticsearch Service：提供集群内 DNS 访问
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: rag-system
+  labels:
+    app: elasticsearch
+spec:
+  type: ClusterIP
+  selector:
+    app: elasticsearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+      name: http
+    - port: 9300
+      targetPort: 9300
+      name: transport
+
+---
+# ============================
+# Redis - 缓存与会话存储
+# 用途：缓存热点查询结果、限流计数器、会话管理
+# ============================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: rag-system
+  labels:
+    app: redis
+    tier: middleware
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        tier: middleware
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          ports:
+            - containerPort: 6379
+              name: redis
+          # Redis 轻量级，资源需求较少
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          # 存活探针：使用 redis-cli ping 检测
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 3
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: rag-system
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis
+
+---
+# ============================
+# RocketMQ NameServer - 消息队列注册中心
+# 用途：管理 Broker 路由信息
+# ============================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rocketmq-namesrv
+  namespace: rag-system
+  labels:
+    app: rocketmq-namesrv
+    tier: middleware
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rocketmq-namesrv
+  template:
+    metadata:
+      labels:
+        app: rocketmq-namesrv
+        tier: middleware
+    spec:
+      containers:
+        - name: namesrv
+          image: apache/rocketmq:5.1.3
+          # NameServer 启动命令
+          command: ["sh", "mqnamesrv"]
+          ports:
+            - containerPort: 9876
+              name: namesrv
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          livenessProbe:
+            tcpSocket:
+              port: 9876
+            initialDelaySeconds: 20
+            periodSeconds: 10
+
+---
+# RocketMQ NameServer Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: rocketmq-namesrv
+  namespace: rag-system
+  labels:
+    app: rocketmq-namesrv
+spec:
+  type: ClusterIP
+  selector:
+    app: rocketmq-namesrv
+  ports:
+    - port: 9876
+      targetPort: 9876
+      name: namesrv
+
+---
+# ============================
+# RocketMQ Broker - 消息存储与转发
+# 用途：异步解耦文档索引任务（上传文档 → 触发向量化）
+# ============================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rocketmq-broker
+  namespace: rag-system
+  labels:
+    app: rocketmq-broker
+    tier: middleware
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rocketmq-broker
+  template:
+    metadata:
+      labels:
+        app: rocketmq-broker
+        tier: middleware
+    spec:
+      containers:
+        - name: broker
+          image: apache/rocketmq:5.1.3
+          # Broker 启动命令，指定 NameServer 地址
+          command: ["sh", "mqbroker"]
+          args: ["-n", "rocketmq-namesrv.rag-system.svc.cluster.local:9876"]
+          ports:
+            - containerPort: 10911
+              name: broker
+          env:
+            - name: NAMESRV_ADDR
+              value: "rocketmq-namesrv.rag-system.svc.cluster.local:9876"
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          livenessProbe:
+            tcpSocket:
+              port: 10911
+            initialDelaySeconds: 30
+            periodSeconds: 10
+
+---
+# RocketMQ Broker Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: rocketmq-broker
+  namespace: rag-system
+  labels:
+    app: rocketmq-broker
+spec:
+  type: ClusterIP
+  selector:
+    app: rocketmq-broker
+  ports:
+    - port: 10911
+      targetPort: 10911
+      name: broker

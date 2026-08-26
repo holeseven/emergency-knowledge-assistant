@@ -1,0 +1,84 @@
+# ============================================================
+# HorizontalPodAutoscaler - RAG 检索服务自动水平扩缩容
+# author: lxy
+# ============================================================
+#
+# 【HPA 原理】
+# HPA（Horizontal Pod Autoscaler）是 Kubernetes 内置的自动扩缩容控制器。
+# 它通过 Metrics Server 持续采集目标 Deployment 所有 Pod 的资源指标（如 CPU、内存），
+# 每隔 15 秒（默认）计算当前指标均值与目标阈值的比值，决定是否增减 Pod 数量：
+#
+#   期望副本数 = ceil(当前副本数 × (当前指标值 / 目标指标值))
+#
+# 工作流程：
+#   1. Metrics Server 从 kubelet cAdvisor 采集每个 Pod 的 CPU/内存使用量
+#   2. HPA Controller 定期查询 Metrics API，计算所有 Pod 的平均 CPU 利用率
+#   3. 若平均 CPU > 目标阈值（本例 70%），HPA 触发 Scale Up（增加 Pod）
+#   4. 若平均 CPU < 目标阈值且持续一段时间（默认 5 分钟冷却），触发 Scale Down（减少 Pod）
+#   5. 副本数始终被约束在 [minReplicas, maxReplicas] 范围内
+#
+# 为什么选择 CPU 作为扩缩指标：
+#   - RAG 检索 + LLM 推理均为 CPU 密集型操作
+#   - CPU 指标响应快，适合流量突增场景（如大促/考试期间查询高峰）
+#   - 内存通常比较稳定，不适合作为主扩缩依据
+#
+# 面试要点：
+#   - HPA 只能水平扩缩（增减 Pod 数），不能垂直扩缩（增减单 Pod 资源）
+#   - 必须设置 resources.requests 才能计算利用率百分比
+#   - 缩容有冷却期（--horizontal-pod-autoscaler-downscale-stabilization），防止抖动
+#   - 生产环境可结合自定义指标（如 QPS、队列积压）实现更精准的扩缩策略
+# ============================================================
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: rag-service-hpa
+  namespace: rag-system
+  labels:
+    app: rag-service
+spec:
+  # 关联目标：指向 rag-service 的 Deployment
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: rag-service
+
+  # 最小副本数：即使流量很低也保持 2 个 Pod，确保高可用
+  minReplicas: 2
+  # 最大副本数：防止无限扩容耗尽集群资源
+  maxReplicas: 6
+
+  # 扩缩指标配置
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          # Utilization 表示按 requests 的百分比计算
+          # 例如 requests.cpu=250m，目标 70% 即 175m
+          # 当所有 Pod 平均 CPU 使用超过 175m 时触发扩容
+          type: Utilization
+          averageUtilization: 70
+
+  # 扩缩行为精细控制（可选，Kubernetes 1.23+）
+  behavior:
+    # 扩容策略：快速响应流量突增
+    scaleUp:
+      stabilizationWindowSeconds: 60          # 扩容稳定窗口：60 秒内取最大建议值
+      policies:
+        - type: Pods
+          value: 2                            # 单次最多扩 2 个 Pod
+          periodSeconds: 60
+        - type: Percent
+          value: 100                          # 或翻倍当前副本数
+          periodSeconds: 60
+      selectPolicy: Max                       # 取两种策略中扩容更多的
+
+    # 缩容策略：保守缩容，避免抖动
+    scaleDown:
+      stabilizationWindowSeconds: 300         # 缩容稳定窗口：5 分钟内取最小建议值
+      policies:
+        - type: Pods
+          value: 1                            # 单次最多缩 1 个 Pod
+          periodSeconds: 120                  # 每 2 分钟最多缩一次
+      selectPolicy: Min                       # 取最保守的缩容策略

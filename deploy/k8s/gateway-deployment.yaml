@@ -1,0 +1,106 @@
+# ============================================================
+# API 网关服务 - Deployment + Service
+# 核心功能：统一入口、鉴权、限流、路由转发到后端 RAG 服务
+# 技术栈：Java Spring Boot，端口 8080
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-service
+  namespace: rag-system
+  labels:
+    app: gateway-service
+    tier: gateway
+spec:
+  # 网关层 2 副本保证高可用
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gateway-service
+  # 滚动更新策略：保证更新期间至少有 1 个 Pod 可用
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: gateway-service
+        tier: gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      containers:
+        - name: gateway-service
+          image: gateway-service:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+              name: http
+          # 环境变量：中间件连接信息 + 下游服务地址
+          env:
+            - name: REDIS_HOST
+              value: "redis.rag-system.svc.cluster.local"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: ROCKETMQ_NAMESRV_ADDR
+              value: "rocketmq-namesrv.rag-system.svc.cluster.local:9876"
+            - name: RAG_SERVICE_URL
+              # 通过 K8s Service DNS 实现服务发现，无需硬编码 IP
+              value: "http://rag-service.rag-system.svc.cluster.local:8000"
+            - name: SPRING_PROFILES_ACTIVE
+              value: "k8s"
+          # Java 应用通常需要更多内存（JVM 堆 + 元空间）
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          # Spring Boot Actuator 健康检查端点
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 30
+
+---
+# Service：对外暴露网关入口
+# NodePort 类型允许通过 <NodeIP>:<NodePort> 从集群外部访问
+# 生产环境可改为 LoadBalancer 类型，由云厂商分配公网 IP
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-service
+  namespace: rag-system
+  labels:
+    app: gateway-service
+spec:
+  # NodePort：适合本地 kind/minikube 调试；生产改 LoadBalancer
+  type: NodePort
+  selector:
+    app: gateway-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+      # nodePort 范围 30000-32767，不指定则自动分配
+      nodePort: 30080

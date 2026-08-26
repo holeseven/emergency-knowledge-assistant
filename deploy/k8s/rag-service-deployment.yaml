@@ -1,0 +1,101 @@
+# ============================================================
+# RAG 检索服务 - Deployment + Service
+# 核心功能：接收用户查询，调用 ES 检索 + GLM 大模型生成回答
+# 技术栈：Python FastAPI，端口 8000
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-service
+  namespace: rag-system
+  labels:
+    app: rag-service
+    tier: backend
+spec:
+  # 副本数：2 个 Pod 保证高可用，单个 Pod 故障不影响服务
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rag-service
+  template:
+    metadata:
+      labels:
+        app: rag-service
+        tier: backend
+      annotations:
+        # Prometheus 自动发现注解，用于监控指标抓取
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: rag-service
+          # 镜像地址，生产环境替换为私有镜像仓库地址
+          image: rag-service:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+              name: http
+          # 环境变量：从 Secret 和 ConfigMap 引用，避免硬编码敏感信息
+          env:
+            - name: ES_HOST
+              value: "elasticsearch.rag-system.svc.cluster.local:9200"
+            - name: REDIS_HOST
+              value: "redis.rag-system.svc.cluster.local:6379"
+            - name: ROCKETMQ_NAMESRV
+              value: "rocketmq-namesrv.rag-system.svc.cluster.local:9876"
+            - name: GLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  # 从 Secret 引用 API Key，安全管理敏感凭证
+                  name: rag-secrets
+                  key: glm-api-key
+          # 资源限制：保证 QoS 等级为 Burstable，防止 OOM
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          # 存活探针：检测容器是否存活，失败则重启容器（自愈能力）
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # 就绪探针：检测容器是否可以接收流量，未就绪则从 Service 端点移除
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      # 优雅关闭：给 30 秒处理完正在进行的请求
+      terminationGracePeriodSeconds: 30
+
+---
+# Service：为 rag-service Pod 提供稳定的集群内访问入口
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-service
+  namespace: rag-system
+  labels:
+    app: rag-service
+spec:
+  # ClusterIP 类型：仅集群内部可访问，由 gateway 代理对外暴露
+  type: ClusterIP
+  selector:
+    app: rag-service
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
