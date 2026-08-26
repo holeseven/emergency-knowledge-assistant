@@ -1,0 +1,13 @@
+.env
+node_modules/
+target/
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+data/vectordb/
+*.log
+.idea/
+.DS_Store
+ai-customer/
