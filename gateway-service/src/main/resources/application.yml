@@ -1,0 +1,53 @@
+# ===================================================================
+# 安全应急 RAG 客服系统 - Java 网关与治理层 配置
+# 说明：每个中间件都做了“连不上也能启动”的降级处理，便于本地演示。
+# ===================================================================
+
+server:
+  # 网关对外端口，前端 React 请求打到这里
+  port: 8080
+
+spring:
+  application:
+    name: gateway-service
+  data:
+    redis:
+      # Redis 用于：Redisson 分布式限流 / 幂等锁 / 防重放 nonce / 敏感词库
+      # 注意：RedissonClient 采用懒加载，Redis 不可用不会阻断服务启动
+      host: localhost
+      port: 6379
+      timeout: 3000ms
+
+# ---------------------------------------------------------------
+# RocketMQ：IngestController 通过它异步投递文档入库任务
+# 名称服务连不上时，IngestController 会自动降级为直连 Python /api/ingest
+# ---------------------------------------------------------------
+rocketmq:
+  name-server: localhost:9876
+  producer:
+    # 生产者组名，同组共享发送配额与事务协调
+    group: rag-producer-group
+    # 发送超时（毫秒），设短一点便于快速降级
+    send-message-timeout: 3000
+
+# ---------------------------------------------------------------
+# 下游 Python RAG 服务地址（提供 /api/chat SSE 与 /api/ingest）
+# RagServiceClient 会以此为 baseUrl 构建 WebClient
+# ---------------------------------------------------------------
+rag-service:
+  base-url: http://localhost:8000
+
+# ---------------------------------------------------------------
+# Sentinel：对 /api/chat 资源做 QPS=10 流控（规则在 SentinelConfig 中以代码方式加载）
+# 这里关闭对控制台的饿汉式连接，避免本地无控制台时的告警
+# ---------------------------------------------------------------
+spring.cloud.sentinel:
+  eager: false
+  transport:
+    # 本地演示无需 Sentinel Dashboard；如需可视化可配置为控制台地址
+    dashboard: ""
+
+# 日志：治理链路的降级与拦截都会打 warn，便于排查
+logging:
+  level:
+    com.caict.rag: info
