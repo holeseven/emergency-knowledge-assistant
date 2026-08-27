@@ -1,4 +1,4 @@
-# 前端 - 安全应急智能问答助手
+# Emergency Knowledge Assistant - 前端
 
 React + Vite + TypeScript 实现的 SSE 流式聊天界面。Author: lxy
 

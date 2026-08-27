@@ -1,5 +1,5 @@
 #!/bin/bash
-# 安全应急智能问答 RAG 客服系统 - 一键启动脚本
+# Emergency Knowledge Assistant - 一键启动脚本
 # Author: lxy
 
 echo "=== 启动中间件 ==="
