@@ -1,39 +1,128 @@
-# Emergency Knowledge Assistant - 安全应急智能知识问答系统
+# Emergency Knowledge Assistant
 
-> 基于安全应急场景的企业级 RAG 智能知识问答系统，全栈真实运行。
-> Author: lxy
+安全应急场景的全栈 RAG 知识问答原型，包含 React 流式界面、Spring WebFlux 网关和 Python FastAPI RAG 服务。
 
-## 技术栈
+## Features
 
-| 层 | 技术 |
-|---|------|
-| 前端 | React + Vite + TypeScript（SSE 流式聊天） |
-| 网关 | Spring Boot + Cloud Gateway + WebFlux + Sentinel |
-| 治理 | Redis + Redisson（限流/防重/护栏）、RocketMQ（异步削峰） |
-| RAG | Python FastAPI + LangChain + Elasticsearch（混合检索） |
-| 大模型 | 智谱 GLM（流式生成 + embedding） |
-| 评估 | RAGAS（忠实度/相关性/精确度） |
-| 部署 | Docker Compose + K8s manifests |
+- Markdown/TXT 文档加载、递归切分与批量 Embedding
+- Elasticsearch `dense_vector` + kNN 检索与相似度阈值过滤
+- GLM/Mock Provider、约束 Prompt、引用来源和无结果拒答
+- FastAPI SSE 生成与 Spring WebFlux 流式透传
+- Sentinel 资源限流与 Redisson 集群共享速率限制
+- 时间戳 + nonce 防重放、分布式锁防重复提交、Redis 输入护栏
+- RocketMQ Producer 与 Python 直连降级
+- Docker Compose、Kubernetes Deployment/Service、CPU HPA 示例
+
+## Architecture
+
+```text
+React :5173
+  -> Spring WebFlux Gateway :8080
+  -> FastAPI RAG Service :8000
+  -> Elasticsearch / GLM
+```
+
+问答链路：
+
+```text
+Question
+  -> Gateway guardrails and rate limiting
+  -> Query embedding
+  -> Elasticsearch kNN retrieval
+  -> Similarity threshold
+  -> Prompt with retrieved context
+  -> Streaming answer and citations
+```
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React, Vite, TypeScript, EventSource |
+| Gateway | Spring Boot, Spring WebFlux, Sentinel, Redisson |
+| RAG service | Python, FastAPI, LangChain |
+| Retrieval | Elasticsearch dense vector and kNN |
+| Model | GLM or local Mock Provider |
+| Middleware | Redis, RocketMQ |
+| Deployment | Docker Compose, Kubernetes, HPA, Prometheus config |
 
 ## Quick Start
 
+### 1. Configure environment
+
 ```bash
-# 1. 复制环境配置
 cp .env.example .env
-# 编辑 .env 填入 GLM API Key
-
-# 2. 一键启动中间件
-chmod +x start-all.sh
-./start-all.sh
-
-# 3. 启动各服务（见 start-all.sh 输出提示）
 ```
 
-## 项目结构
+Without `GLM_API_KEY`, `RUN_MODE=auto` uses the Mock providers.
 
-- `rag-service/` — Python RAG 核心服务
-- `gateway-service/` — Java 网关与治理层
-- `frontend/` — React 聊天前端
-- `data/` — 安全应急语料与评估数据集
-- `deploy/` — K8s 部署清单
-- `docs/` — 架构设计、技术选型、面试问答文档
+### 2. Start middleware
+
+```bash
+docker compose up -d
+```
+
+### 3. Start the RAG service
+
+```bash
+cd rag-service
+python -m venv .venv
+```
+
+Linux/macOS:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m uvicorn app.main:app --port 8000
+```
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m uvicorn app.main:app --port 8000
+```
+
+### 4. Start the gateway
+
+```bash
+cd gateway-service
+mvn spring-boot:run
+```
+
+### 5. Start the frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`.
+
+### 6. Ingest sample documents
+
+```bash
+curl -X POST http://localhost:8000/api/ingest \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+## API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/health` | RAG service health and run mode |
+| POST | `/api/chat` | Python SSE chat endpoint |
+| GET | `/api/chat` | Gateway SSE chat endpoint for EventSource |
+| POST | `/api/ingest` | Load and index local documents |
+| GET | `/api/evaluate` | Run the local evaluation set |
+
+## Current Scope
+
+- Retrieval currently uses kNN only; BM25 fusion and reranking are not included.
+- The evaluation module contains lightweight lexical proxy metrics rather than the complete RAGAS framework.
+- The Java RocketMQ Producer is available, while the Python consumer remains a local extension point; direct ingestion is the complete runnable path.
+- Kubernetes HPA uses CPU utilization. Prometheus files provide scrape configuration examples.
